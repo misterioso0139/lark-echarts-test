@@ -27,11 +27,6 @@
     border: 1px solid rgba(128,128,128,.4); border-radius: 5px;
     background: transparent; color: inherit;
   }
-  #stage {
-    font-size: 11px; color: #3370ff;
-    background: rgba(51,112,255,.08); padding: 7px 9px; border-radius: 5px;
-    line-height: 1.5;
-  }
   #save {
     margin-top: auto; padding: 9px; border: none; border-radius: 5px;
     background: #3370ff; color: #fff; font-size: 14px; cursor: pointer;
@@ -41,7 +36,7 @@
     position: absolute; left: 10px; bottom: 8px; width: 58%;
     font-size: 11px; line-height: 1.5; color: #667085;
     white-space: pre-wrap; word-break: break-all;
-    max-height: 90px; overflow: auto; pointer-events: none;
+    max-height: 80px; overflow: auto; pointer-events: none;
   }
 </style>
 </head>
@@ -50,11 +45,16 @@
 <div id="chart"></div>
 
 <div id="panel">
-  <div id="stage"></div>
   <div><label for="tableSel">資料表</label><select id="tableSel"></select></div>
-  <div><label for="rangeSel">資料範圍</label><select id="rangeSel"></select></div>
   <div><label for="groupSel">依什麼分組</label><select id="groupSel"></select></div>
   <div><label for="seriesSel">統計方式</label><select id="seriesSel"></select></div>
+  <div>
+    <label for="typeSel">圖表樣式</label>
+    <select id="typeSel">
+      <option value="bar">長條圖</option>
+      <option value="forest">象形長條圖（森林）</option>
+    </select>
+  </div>
   <button id="save" disabled>儲存並套用</button>
 </div>
 
@@ -63,19 +63,17 @@
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
 
 <script type="module">
-import { bitable, dashboard, DashboardState, SourceType, Rollup, FieldType,
-         GroupMode, ORDER, DATA_SOURCE_SORT_TYPE }
+import { bitable, dashboard, DashboardState, FieldType }
   from 'https://cdn.jsdelivr.net/npm/@lark-base-open/js-sdk@1.0.2/+esm';
 
 const $ = id => document.getElementById(id);
 const chartEl = $('chart'), chart = echarts.init(chartEl);
-const panel = $('panel'), stageEl = $('stage');
-const tableSel = $('tableSel'), rangeSel = $('rangeSel');
-const groupSel = $('groupSel'), seriesSel = $('seriesSel');
-const saveBtn = $('save'), msg = $('msg');
+const panel = $('panel'), tableSel = $('tableSel'), groupSel = $('groupSel');
+const seriesSel = $('seriesSel'), typeSel = $('typeSel'), saveBtn = $('save');
+const msg = $('msg');
 
 const lines = [];
-const say = t => { lines.push(t); if (lines.length > 5) lines.shift();
+const say = t => { lines.push(t); if (lines.length > 4) lines.shift();
                    msg.textContent = lines.join('\n'); };
 const noise = m => /ResizeObserver/.test(m || '');
 window.addEventListener('error', e => { if (!noise(e.message)) say('錯誤：' + e.message); });
@@ -88,18 +86,13 @@ let raf = 0;
 new ResizeObserver(() => { cancelAnimationFrame(raf);
   raf = requestAnimationFrame(() => chart.resize()); }).observe(chartEl);
 
-const isCreate = dashboard.state === DashboardState.Create;
-const isConfig = dashboard.state === DashboardState.Config;
+// 一棵針葉樹的輪廓
+const TREE = 'path://M0,-32 L11,-11 L5,-11 L14,4 L4,4 L4,13 L-4,13 L-4,4 '
+           + 'L-14,4 L-5,-11 L-11,-11 Z';
 
-// ---------- 畫圖 ----------
-function drawPairs(pairs, title) {
-  if (!pairs?.length) {
-    chart.clear();
-    chart.setOption({ title: { text: '沒有資料', left: 'center', top: 'middle' } });
-    return;
-  }
+function drawBar(pairs, title) {
   chart.setOption({
-    title: { text: title || '', left: 'center' },
+    title: { text: title, left: 'center' },
     tooltip: { trigger: 'axis' },
     grid: { left: 60, right: 30, top: 56, bottom: 100 },
     xAxis: { type: 'category', data: pairs.map(p => p[0]),
@@ -109,10 +102,50 @@ function drawPairs(pairs, title) {
     series: [{ type: 'bar', data: pairs.map(p => p[1]) }]
   }, true);
 }
-const fromHost = d => (Array.isArray(d) ? d.slice(1) : [])
-  .map(r => [r[0]?.text ?? '(空白)', Number(r[1]?.value) || 0]);
 
-// ---------- 備援：自己讀自己算 ----------
+function drawForest(pairs, title) {
+  chart.setOption({
+    title: { text: title, left: 'center' },
+    tooltip: { trigger: 'axis' },
+    grid: { left: 30, right: 30, top: 70, bottom: 90 },
+    xAxis: {
+      type: 'category', data: pairs.map(p => p[0]),
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: 'rgba(128,128,128,.4)' } },
+      axisLabel: { interval: 0, rotate: 30, margin: 12,
+        formatter: v => (v.length > 8 ? v.slice(0, 8) + '…' : v) }
+    },
+    yAxis: {
+      splitLine: { show: false }, axisTick: { show: false },
+      axisLine: { show: false }, axisLabel: { show: false }
+    },
+    series: [{
+      type: 'pictorialBar',
+      symbol: TREE,
+      symbolRepeat: true,          // 依數值重複堆疊樹的圖形
+      symbolSize: [26, 26],
+      symbolMargin: '12%',
+      symbolClip: true,            // 超出數值的部分裁掉，末端會出現半棵樹
+      itemStyle: { color: '#2e9e5b' },
+      label: {
+        show: true, position: 'top', distance: 10,
+        fontSize: 13, fontWeight: 'bold', color: 'inherit'
+      },
+      data: pairs.map(p => p[1])
+    }]
+  }, true);
+}
+
+function draw(pairs, title) {
+  if (!pairs?.length) {
+    chart.clear();
+    chart.setOption({ title: { text: '沒有資料', left: 'center', top: 'middle' } });
+    return;
+  }
+  (typeSel.value === 'forest' ? drawForest : drawBar)(pairs, title || '');
+}
+
+// ---------- 讀資料、在瀏覽器裡自己統計 ----------
 function toText(v) {
   if (v === null || v === undefined || v === '') return '(空白)';
   if (typeof v === 'string' || typeof v === 'number') return String(v);
@@ -123,89 +156,106 @@ function toText(v) {
   if (typeof v === 'object') return v.text ?? v.name ?? '(空白)';
   return String(v);
 }
-async function selfCount(tableId, fieldId) {
+function toNum(v) {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string') return Number(v) || 0;
+  if (Array.isArray(v)) return Number(v[0]?.text) || 0;
+  if (v && typeof v === 'object') return Number(v.value ?? v.text) || 0;
+  return 0;
+}
+
+async function readField(tableId, fieldId) {
   const table = await bitable.base.getTableById(tableId);
   const field = await table.getFieldById(fieldId);
-  const tally = new Map();
+  const out = new Map();
   let pageToken, hasMore = true, guard = 0;
   while (hasMore && guard++ < 50) {
     const res = await field.getFieldValueListByPage({ pageSize: 200, pageToken });
-    for (const it of (res.fieldValues || [])) {
-      const k = toText(it.value);
-      tally.set(k, (tally.get(k) || 0) + 1);
-    }
+    for (const it of (res.fieldValues || [])) out.set(it.recordId, it.value);
     hasMore = res.hasMore; pageToken = res.pageToken;
   }
-  return [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20);
+  return out;
 }
 
-// ---------- 設定內容 ----------
-let ranges = [];
-function buildSeries() {
-  const v = seriesSel.value;
-  if (v === 'COUNTA') return 'COUNTA';
-  const [fieldId, rollup] = v.split('|');
-  return [{ fieldId, rollup }];
+async function aggregate(tableId, groupFieldId, seriesKey) {
+  const groups = await readField(tableId, groupFieldId);
+
+  if (seriesKey === 'COUNTA') {
+    const tally = new Map();
+    for (const v of groups.values()) {
+      const k = toText(v);
+      tally.set(k, (tally.get(k) || 0) + 1);
+    }
+    return [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20);
+  }
+
+  const [valueFieldId, rollup] = seriesKey.split('|');
+  const values = await readField(tableId, valueFieldId);
+
+  const buckets = new Map();
+  for (const [recId, gv] of groups) {
+    const k = toText(gv);
+    if (!buckets.has(k)) buckets.set(k, []);
+    buckets.get(k).push(toNum(values.get(recId)));
+  }
+
+  const out = [];
+  for (const [k, nums] of buckets) {
+    let r;
+    if (rollup === 'SUM')          r = nums.reduce((a, b) => a + b, 0);
+    else if (rollup === 'AVERAGE') r = nums.reduce((a, b) => a + b, 0) / (nums.length || 1);
+    else if (rollup === 'MAX')     r = Math.max(...nums);
+    else                           r = Math.min(...nums);
+    out.push([k, Math.round(r * 100) / 100]);
+  }
+  return out.sort((a, b) => b[1] - a[1]).slice(0, 20);
 }
-const dataCondition = () => ({
-  tableId: tableSel.value,
-  dataRange: ranges[rangeSel.value] || { type: SourceType.ALL },
-  series: buildSeries(),
-  groups: [{
-    fieldId: groupSel.value,
-    mode: GroupMode.INTEGRATED,
-    sort: { order: ORDER.ASCENDING, sortType: DATA_SOURCE_SORT_TYPE.VIEW }
-  }]
-});
+
+// ---------- 設定 ----------
+const isConfigStage = dashboard.state === DashboardState.Create ||
+                      dashboard.state === DashboardState.Config;
+
 const customConfig = () => ({
   tableId:   tableSel.value,
   fieldId:   groupSel.value,
-  rangeIdx:  rangeSel.value,
   seriesKey: seriesSel.value,
+  chartType: typeSel.value,
   fieldName: groupSel.options[groupSel.selectedIndex]?.text || ''
 });
 
-// ---------- 設定 / 創建狀態 ----------
 async function setupConfigUI() {
   panel.classList.add('show');
-  stageEl.textContent = isCreate
-    ? '創建階段：這次只會記住你的選擇。存檔後請點元件右上角的「⋮ → 重新設定」，再存一次，才會啟用主端統計。'
-    : '設定階段：這次會完整寫入資料來源設定，啟用主端統計。';
-
-  saveBtn.textContent = isCreate ? '建立圖表' : '儲存並套用';
-
   const tables = await bitable.base.getTableMetaList();
   for (const t of tables) tableSel.add(new Option(t.name, t.id));
 
-  let saved = null;
-  if (!isCreate) saved = await dashboard.getConfig().catch(() => null);
-  const c = saved?.customConfig;
+  let c = null;
+  if (dashboard.state !== DashboardState.Create) {
+    c = (await dashboard.getConfig().catch(() => null))?.customConfig;
+  }
   if (c?.tableId && [...tableSel.options].some(o => o.value === c.tableId)) {
     tableSel.value = c.tableId;
   }
-  await loadTableDetail(c);
+  if (c?.chartType) typeSel.value = c.chartType;
+  await loadFields(c);
 }
 
-async function loadTableDetail(c) {
+async function loadFields(c) {
   saveBtn.disabled = true;
-  rangeSel.innerHTML = ''; groupSel.innerHTML = ''; seriesSel.innerHTML = '';
+  groupSel.innerHTML = ''; seriesSel.innerHTML = '';
 
-  ranges = await dashboard.getTableDataRange(tableSel.value);
-  ranges.forEach((r, i) => rangeSel.add(new Option(
-    r.type === SourceType.ALL ? '全部資料' : `視圖：${r.viewName}`, i)));
-  if (c?.rangeIdx && ranges[c.rangeIdx]) rangeSel.value = c.rangeIdx;
-
-  const cats = await dashboard.getCategories(tableSel.value);
-  for (const cat of cats) groupSel.add(new Option(cat.fieldName, cat.fieldId));
+  const table  = await bitable.base.getTableById(tableSel.value);
+  const fields = await table.getFieldMetaList();
+  for (const f of fields) groupSel.add(new Option(f.name, f.id));
   if (c?.fieldId && [...groupSel.options].some(o => o.value === c.fieldId)) {
     groupSel.value = c.fieldId;
   }
 
-  seriesSel.add(new Option('記錄筆數 (COUNTA)', 'COUNTA'));
-  for (const cat of cats) {
-    if (cat.fieldType === FieldType.Number) {
-      for (const r of [Rollup.SUM, Rollup.AVERAGE, Rollup.MAX, Rollup.MIN]) {
-        seriesSel.add(new Option(`${cat.fieldName} — ${r}`, `${cat.fieldId}|${r}`));
+  seriesSel.add(new Option('記錄筆數', 'COUNTA'));
+  for (const f of fields) {
+    if (f.type === FieldType.Number) {
+      for (const r of ['SUM', 'AVERAGE', 'MAX', 'MIN']) {
+        const zh = { SUM: '總和', AVERAGE: '平均', MAX: '最大', MIN: '最小' }[r];
+        seriesSel.add(new Option(`${f.name} — ${zh}`, `${f.id}|${r}`));
       }
     }
   }
@@ -213,69 +263,48 @@ async function loadTableDetail(c) {
     seriesSel.value = c.seriesKey;
   }
 
-  saveBtn.disabled = cats.length === 0;
-  await preview();
+  saveBtn.disabled = fields.length === 0;
+  await render('預覽');
 }
 
-async function preview() {
+async function render(title) {
   if (!tableSel.value || !groupSel.value) return;
-  try { drawPairs(fromHost(await dashboard.getPreviewData(dataCondition())), '預覽'); }
-  catch (e) {
-    say('主端預覽失敗，改用自行統計');
-    drawPairs(await selfCount(tableSel.value, groupSel.value), '預覽');
-  }
+  try {
+    draw(await aggregate(tableSel.value, groupSel.value, seriesSel.value), title);
+  } catch (e) { say('讀資料失敗：' + e.message); }
 }
 
-tableSel.onchange  = () => loadTableDetail(null).catch(e => say(e.message));
-rangeSel.onchange  = preview;
-groupSel.onchange  = preview;
-seriesSel.onchange = preview;
+tableSel.onchange  = () => loadFields(null).catch(e => say(e.message));
+groupSel.onchange  = () => render('預覽');
+seriesSel.onchange = () => render('預覽');
+typeSel.onchange   = () => render('預覽');
 
 saveBtn.onclick = async () => {
   saveBtn.disabled = true;
   try {
-    // 創建階段資料尚未落庫，只存 customConfig，不碰 dataConditions
-    const config = isCreate
-      ? { dataConditions: [], customConfig: customConfig() }
-      : { dataConditions: dataCondition(), customConfig: customConfig() };
-    await dashboard.saveConfig(config);
+    // 不寫入 dataConditions，避免主端資料計算不穩定的問題
+    await dashboard.saveConfig({ dataConditions: [], customConfig: customConfig() });
   } catch (e) { say('存檔失敗：' + e.message); saveBtn.disabled = false; }
 };
 
-// ---------- 展示狀態 ----------
+// ---------- 展示 ----------
 async function showChart() {
   panel.classList.remove('show');
-  const cfg = await dashboard.getConfig().catch(() => null);
-  const c   = cfg?.customConfig || {};
-  const dc  = cfg?.dataConditions;
-  const hasCondition = Array.isArray(dc) ? dc.length > 0 : !!dc;
-
-  if (hasCondition) {
-    try {
-      drawPairs(fromHost(await dashboard.getData()), c.fieldName || '');
-      say('✓ 主端統計');
-      dashboard.setRendered().catch(() => {});
-      return;
-    } catch (e) { say('主端取資料失敗：' + e.message); }
-  }
-
-  if (c.tableId) {
-    try {
-      drawPairs(await selfCount(c.tableId, c.fieldId), c.fieldName || '');
-      say(hasCondition ? '✓ 自行統計（備援）'
-                       : '✓ 自行統計。點「⋮ → 重新設定」再存一次可啟用主端統計。');
-    } catch (e) { say('自行統計失敗：' + e.message); }
-  }
+  const c = (await dashboard.getConfig().catch(() => null))?.customConfig;
+  if (!c?.tableId) { say('沒有讀到設定'); return; }
+  typeSel.value = c.chartType || 'bar';
+  try {
+    draw(await aggregate(c.tableId, c.fieldId, c.seriesKey), c.fieldName || '');
+  } catch (e) { say('讀資料失敗：' + e.message); }
   dashboard.setRendered().catch(() => {});
 }
 
-if (isCreate || isConfig) {
+if (isConfigStage) {
   setupConfigUI().catch(e => say('初始化失敗：' + e.message));
 } else {
   showChart();
 }
 
-dashboard.onDataChange(({ data }) => drawPairs(fromHost(data)));
 dashboard.onConfigChange(() => showChart());
 </script>
 
