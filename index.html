@@ -18,7 +18,7 @@
     flex: none; width: 262px;
     border-left: 1px solid rgba(128,128,128,.25);
     padding: 16px; display: none; flex-direction: column;
-    gap: 12px; overflow: auto; font-size: 13px;
+    gap: 11px; overflow: auto; font-size: 13px;
   }
   #panel.show { display: flex; }
   #panel label { display: block; margin-bottom: 5px; color: #666; }
@@ -27,6 +27,8 @@
     border: 1px solid rgba(128,128,128,.4); border-radius: 5px;
     background: transparent; color: inherit;
   }
+  .grp { display: block; }
+  .grp.hide { display: none; }
   #save {
     margin-top: auto; padding: 9px; border: none; border-radius: 5px;
     background: #3370ff; color: #fff; font-size: 14px; cursor: pointer;
@@ -46,21 +48,35 @@
 
 <div id="panel">
   <div><label for="tableSel">資料表</label><select id="tableSel"></select></div>
-  <div><label for="groupSel">依什麼分組</label><select id="groupSel"></select></div>
-  <div><label for="seriesSel">統計方式</label><select id="seriesSel"></select></div>
-  <div>
-    <label for="typeSel">圖表樣式</label>
+  <div><label for="typeSel">圖表樣式</label>
     <select id="typeSel">
       <option value="bar">長條圖</option>
       <option value="forest">象形長條圖（森林）</option>
+      <option value="pie">圓餅圖</option>
+      <option value="scatter3d">3D 散佈圖</option>
     </select>
   </div>
+
+  <!-- 統計型圖表用 -->
+  <div class="grp" id="grp2d">
+    <div><label for="groupSel">依什麼分組</label><select id="groupSel"></select></div>
+    <div style="margin-top:11px"><label for="seriesSel">統計方式</label><select id="seriesSel"></select></div>
+  </div>
+
+  <!-- 3D 散佈圖用 -->
+  <div class="grp hide" id="grp3d">
+    <div><label for="xSel">X 軸</label><select id="xSel"></select></div>
+    <div style="margin-top:11px"><label for="ySel">Y 軸</label><select id="ySel"></select></div>
+    <div style="margin-top:11px"><label for="zSel">Z 軸</label><select id="zSel"></select></div>
+  </div>
+
   <button id="save" disabled>儲存並套用</button>
 </div>
 
 <div id="msg"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts-gl@2.0.9/dist/echarts-gl.min.js"></script>
 
 <script type="module">
 import { bitable, dashboard, DashboardState, FieldType }
@@ -68,9 +84,11 @@ import { bitable, dashboard, DashboardState, FieldType }
 
 const $ = id => document.getElementById(id);
 const chartEl = $('chart'), chart = echarts.init(chartEl);
-const panel = $('panel'), tableSel = $('tableSel'), groupSel = $('groupSel');
-const seriesSel = $('seriesSel'), typeSel = $('typeSel'), saveBtn = $('save');
-const msg = $('msg');
+const panel = $('panel'), tableSel = $('tableSel'), typeSel = $('typeSel');
+const groupSel = $('groupSel'), seriesSel = $('seriesSel');
+const xSel = $('xSel'), ySel = $('ySel'), zSel = $('zSel');
+const grp2d = $('grp2d'), grp3d = $('grp3d');
+const saveBtn = $('save'), msg = $('msg');
 
 const lines = [];
 const say = t => { lines.push(t); if (lines.length > 4) lines.shift();
@@ -86,7 +104,9 @@ let raf = 0;
 new ResizeObserver(() => { cancelAnimationFrame(raf);
   raf = requestAnimationFrame(() => chart.resize()); }).observe(chartEl);
 
-// 一棵針葉樹的輪廓
+const is3D = () => typeSel.value === 'scatter3d';
+
+// ================= 繪圖 =================
 const TREE = 'path://M0,-32 L11,-11 L5,-11 L14,4 L4,4 L4,13 L-4,13 L-4,4 '
            + 'L-14,4 L-5,-11 L-11,-11 Z';
 
@@ -108,44 +128,69 @@ function drawForest(pairs, title) {
     title: { text: title, left: 'center' },
     tooltip: { trigger: 'axis' },
     grid: { left: 30, right: 30, top: 70, bottom: 90 },
-    xAxis: {
-      type: 'category', data: pairs.map(p => p[0]),
+    xAxis: { type: 'category', data: pairs.map(p => p[0]),
       axisTick: { show: false },
       axisLine: { lineStyle: { color: 'rgba(128,128,128,.4)' } },
       axisLabel: { interval: 0, rotate: 30, margin: 12,
-        formatter: v => (v.length > 8 ? v.slice(0, 8) + '…' : v) }
-    },
-    yAxis: {
-      splitLine: { show: false }, axisTick: { show: false },
-      axisLine: { show: false }, axisLabel: { show: false }
-    },
+        formatter: v => (v.length > 8 ? v.slice(0, 8) + '…' : v) } },
+    yAxis: { splitLine: { show: false }, axisTick: { show: false },
+      axisLine: { show: false }, axisLabel: { show: false } },
     series: [{
-      type: 'pictorialBar',
-      symbol: TREE,
-      symbolRepeat: true,          // 依數值重複堆疊樹的圖形
-      symbolSize: [26, 26],
-      symbolMargin: '12%',
-      symbolClip: true,            // 超出數值的部分裁掉，末端會出現半棵樹
+      type: 'pictorialBar', symbol: TREE, symbolRepeat: true,
+      symbolSize: [26, 26], symbolMargin: '12%', symbolClip: true,
       itemStyle: { color: '#2e9e5b' },
-      label: {
-        show: true, position: 'top', distance: 10,
-        fontSize: 13, fontWeight: 'bold', color: 'inherit'
-      },
+      label: { show: true, position: 'top', distance: 10,
+               fontSize: 13, fontWeight: 'bold' },
       data: pairs.map(p => p[1])
     }]
   }, true);
 }
 
-function draw(pairs, title) {
-  if (!pairs?.length) {
-    chart.clear();
-    chart.setOption({ title: { text: '沒有資料', left: 'center', top: 'middle' } });
-    return;
-  }
-  (typeSel.value === 'forest' ? drawForest : drawBar)(pairs, title || '');
+function drawPie(pairs, title) {
+  chart.setOption({
+    title: { text: title, left: 'center' },
+    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+    series: [{
+      type: 'pie', radius: ['38%', '68%'], center: ['50%', '55%'],
+      data: pairs.map(p => ({ name: p[0], value: p[1] })),
+      label: { formatter: '{b}\n{c}' }
+    }]
+  }, true);
 }
 
-// ---------- 讀資料、在瀏覽器裡自己統計 ----------
+// rows = [[x, y, z], ...]，names 是三個軸的欄位名稱
+function drawScatter3D(rows, names) {
+  const zs = rows.map(r => r[2]);
+  chart.setOption({
+    tooltip: {
+      formatter: p => `${names[0]}: ${p.value[0]}<br>${names[1]}: ${p.value[1]}`
+                    + `<br>${names[2]}: ${p.value[2]}`
+    },
+    visualMap: {
+      show: true, dimension: 2, left: 10, bottom: 20,
+      min: Math.min(...zs), max: Math.max(...zs),
+      calculable: true, precision: 1,
+      inRange: { color: ['#3370ff', '#2ec7c9', '#f5c542', '#ff6b6b'] }
+    },
+    xAxis3D: { type: 'value', name: names[0] },
+    yAxis3D: { type: 'value', name: names[1] },
+    zAxis3D: { type: 'value', name: names[2] },
+    grid3D: {
+      viewControl: { autoRotate: true, autoRotateSpeed: 8 },
+      axisLine: { lineStyle: { color: 'rgba(128,128,128,.6)' } },
+      axisPointer: { lineStyle: { color: 'rgba(128,128,128,.6)' } }
+    },
+    series: [{
+      type: 'scatter3D', symbolSize: 12, data: rows,
+      itemStyle: { opacity: 0.85, borderWidth: 1,
+                   borderColor: 'rgba(255,255,255,.5)' }
+    }]
+  }, true);
+}
+
+const CHARTS_2D = { bar: drawBar, forest: drawForest, pie: drawPie };
+
+// ================= 讀資料 =================
 function toText(v) {
   if (v === null || v === undefined || v === '') return '(空白)';
   if (typeof v === 'string' || typeof v === 'number') return String(v);
@@ -158,10 +203,10 @@ function toText(v) {
 }
 function toNum(v) {
   if (typeof v === 'number') return v;
-  if (typeof v === 'string') return Number(v) || 0;
-  if (Array.isArray(v)) return Number(v[0]?.text) || 0;
-  if (v && typeof v === 'object') return Number(v.value ?? v.text) || 0;
-  return 0;
+  if (typeof v === 'string') { const n = Number(v); return isNaN(n) ? null : n; }
+  if (Array.isArray(v)) { const n = Number(v[0]?.text); return isNaN(n) ? null : n; }
+  if (v && typeof v === 'object') { const n = Number(v.value ?? v.text); return isNaN(n) ? null : n; }
+  return null;
 }
 
 async function readField(tableId, fieldId) {
@@ -177,9 +222,9 @@ async function readField(tableId, fieldId) {
   return out;
 }
 
+// 統計型：分組後彙總
 async function aggregate(tableId, groupFieldId, seriesKey) {
   const groups = await readField(tableId, groupFieldId);
-
   if (seriesKey === 'COUNTA') {
     const tally = new Map();
     for (const v of groups.values()) {
@@ -188,17 +233,14 @@ async function aggregate(tableId, groupFieldId, seriesKey) {
     }
     return [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20);
   }
-
   const [valueFieldId, rollup] = seriesKey.split('|');
   const values = await readField(tableId, valueFieldId);
-
   const buckets = new Map();
   for (const [recId, gv] of groups) {
     const k = toText(gv);
     if (!buckets.has(k)) buckets.set(k, []);
-    buckets.get(k).push(toNum(values.get(recId)));
+    buckets.get(k).push(toNum(values.get(recId)) ?? 0);
   }
-
   const out = [];
   for (const [k, nums] of buckets) {
     let r;
@@ -211,17 +253,35 @@ async function aggregate(tableId, groupFieldId, seriesKey) {
   return out.sort((a, b) => b[1] - a[1]).slice(0, 20);
 }
 
-// ---------- 設定 ----------
-const isConfigStage = dashboard.state === DashboardState.Create ||
-                      dashboard.state === DashboardState.Config;
+// 散佈型：不統計，一筆記錄一個點
+async function rawRows(tableId, fieldIds) {
+  const maps = [];
+  for (const fid of fieldIds) maps.push(await readField(tableId, fid));
+  const rows = [];
+  for (const recId of maps[0].keys()) {
+    const point = maps.map(m => toNum(m.get(recId)));
+    if (point.every(n => n !== null)) rows.push(point);   // 有空值就跳過
+  }
+  return rows;
+}
 
+// ================= 設定 =================
 const customConfig = () => ({
-  tableId:   tableSel.value,
-  fieldId:   groupSel.value,
-  seriesKey: seriesSel.value,
+  tableId: tableSel.value,
   chartType: typeSel.value,
-  fieldName: groupSel.options[groupSel.selectedIndex]?.text || ''
+  fieldId: groupSel.value,
+  seriesKey: seriesSel.value,
+  fieldName: groupSel.options[groupSel.selectedIndex]?.text || '',
+  xId: xSel.value, yId: ySel.value, zId: zSel.value,
+  xName: xSel.options[xSel.selectedIndex]?.text || '',
+  yName: ySel.options[ySel.selectedIndex]?.text || '',
+  zName: zSel.options[zSel.selectedIndex]?.text || ''
 });
+
+function syncPanel() {
+  grp2d.classList.toggle('hide', is3D());
+  grp3d.classList.toggle('hide', !is3D());
+}
 
 async function setupConfigUI() {
   panel.classList.add('show');
@@ -236,31 +296,43 @@ async function setupConfigUI() {
     tableSel.value = c.tableId;
   }
   if (c?.chartType) typeSel.value = c.chartType;
+  syncPanel();
   await loadFields(c);
 }
 
 async function loadFields(c) {
   saveBtn.disabled = true;
-  groupSel.innerHTML = ''; seriesSel.innerHTML = '';
+  for (const s of [groupSel, seriesSel, xSel, ySel, zSel]) s.innerHTML = '';
 
   const table  = await bitable.base.getTableById(tableSel.value);
   const fields = await table.getFieldMetaList();
+  const nums   = fields.filter(f => f.type === FieldType.Number);
+
   for (const f of fields) groupSel.add(new Option(f.name, f.id));
   if (c?.fieldId && [...groupSel.options].some(o => o.value === c.fieldId)) {
     groupSel.value = c.fieldId;
   }
 
   seriesSel.add(new Option('記錄筆數', 'COUNTA'));
-  for (const f of fields) {
-    if (f.type === FieldType.Number) {
-      for (const r of ['SUM', 'AVERAGE', 'MAX', 'MIN']) {
-        const zh = { SUM: '總和', AVERAGE: '平均', MAX: '最大', MIN: '最小' }[r];
-        seriesSel.add(new Option(`${f.name} — ${zh}`, `${f.id}|${r}`));
-      }
+  for (const f of nums) {
+    for (const r of ['SUM', 'AVERAGE', 'MAX', 'MIN']) {
+      const zh = { SUM: '總和', AVERAGE: '平均', MAX: '最大', MIN: '最小' }[r];
+      seriesSel.add(new Option(`${f.name} — ${zh}`, `${f.id}|${r}`));
     }
   }
   if (c?.seriesKey && [...seriesSel.options].some(o => o.value === c.seriesKey)) {
     seriesSel.value = c.seriesKey;
+  }
+
+  // 3D 三個軸都只能選數字欄位
+  for (const sel of [xSel, ySel, zSel]) {
+    for (const f of nums) sel.add(new Option(f.name, f.id));
+  }
+  if (nums.length >= 3) {
+    xSel.selectedIndex = 0; ySel.selectedIndex = 1; zSel.selectedIndex = 2;
+  }
+  if (c?.xId && [...xSel.options].some(o => o.value === c.xId)) {
+    xSel.value = c.xId; ySel.value = c.yId; zSel.value = c.zId;
   }
 
   saveBtn.disabled = fields.length === 0;
@@ -268,38 +340,68 @@ async function loadFields(c) {
 }
 
 async function render(title) {
-  if (!tableSel.value || !groupSel.value) return;
+  if (!tableSel.value) return;
   try {
-    draw(await aggregate(tableSel.value, groupSel.value, seriesSel.value), title);
-  } catch (e) { say('讀資料失敗：' + e.message); }
+    if (is3D()) {
+      if (![xSel.value, ySel.value, zSel.value].every(Boolean)) {
+        chart.clear();
+        chart.setOption({ title: {
+          text: '3D 散佈圖需要三個數字欄位', left: 'center', top: 'middle' } });
+        return;
+      }
+      const rows = await rawRows(tableSel.value, [xSel.value, ySel.value, zSel.value]);
+      drawScatter3D(rows, [
+        xSel.options[xSel.selectedIndex].text,
+        ySel.options[ySel.selectedIndex].text,
+        zSel.options[zSel.selectedIndex].text
+      ]);
+      say(`3D：${rows.length} 個點`);
+    } else {
+      if (!groupSel.value) return;
+      const pairs = await aggregate(tableSel.value, groupSel.value, seriesSel.value);
+      if (!pairs.length) {
+        chart.clear();
+        chart.setOption({ title: { text: '沒有資料', left: 'center', top: 'middle' } });
+        return;
+      }
+      (CHARTS_2D[typeSel.value] || drawBar)(pairs, title || '');
+    }
+  } catch (e) { say('繪製失敗：' + e.message); }
 }
 
 tableSel.onchange  = () => loadFields(null).catch(e => say(e.message));
+typeSel.onchange   = () => { syncPanel(); render('預覽'); };
 groupSel.onchange  = () => render('預覽');
 seriesSel.onchange = () => render('預覽');
-typeSel.onchange   = () => render('預覽');
+xSel.onchange = ySel.onchange = zSel.onchange = () => render('預覽');
 
 saveBtn.onclick = async () => {
   saveBtn.disabled = true;
   try {
-    // 不寫入 dataConditions，避免主端資料計算不穩定的問題
     await dashboard.saveConfig({ dataConditions: [], customConfig: customConfig() });
   } catch (e) { say('存檔失敗：' + e.message); saveBtn.disabled = false; }
 };
 
-// ---------- 展示 ----------
+// ================= 展示 =================
 async function showChart() {
   panel.classList.remove('show');
   const c = (await dashboard.getConfig().catch(() => null))?.customConfig;
   if (!c?.tableId) { say('沒有讀到設定'); return; }
   typeSel.value = c.chartType || 'bar';
   try {
-    draw(await aggregate(c.tableId, c.fieldId, c.seriesKey), c.fieldName || '');
-  } catch (e) { say('讀資料失敗：' + e.message); }
+    if (c.chartType === 'scatter3d') {
+      const rows = await rawRows(c.tableId, [c.xId, c.yId, c.zId]);
+      drawScatter3D(rows, [c.xName, c.yName, c.zName]);
+    } else {
+      const pairs = await aggregate(c.tableId, c.fieldId, c.seriesKey);
+      (CHARTS_2D[c.chartType] || drawBar)(pairs, c.fieldName || '');
+    }
+  } catch (e) { say('繪製失敗：' + e.message); }
   dashboard.setRendered().catch(() => {});
 }
 
-if (isConfigStage) {
+if (dashboard.state === DashboardState.Create ||
+    dashboard.state === DashboardState.Config) {
   setupConfigUI().catch(e => say('初始化失敗：' + e.message));
 } else {
   showChart();
