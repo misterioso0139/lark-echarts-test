@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ECharts × Lark Base 連通測試</title>
+<style>
+  :root { color-scheme: light dark; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    font-family: "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+  }
+  #chart {
+    flex: 1;
+    min-height: 0;
+  }
+  #status {
+    flex: none;
+    padding: 10px 14px;
+    font-size: 12px;
+    line-height: 1.6;
+    border-top: 1px solid rgba(128,128,128,.28);
+    background: rgba(128,128,128,.06);
+    max-height: 30%;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  #status b { font-weight: 600; }
+  .ok  { color: #1a7f37; }
+  .bad { color: #b42318; }
+</style>
+</head>
+<body>
+
+<div id="chart"></div>
+<div id="status">啟動中…</div>
+
+<!-- ECharts：傳統 script 標籤載入，會提供全域變數 echarts -->
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
+
+<script>
+  // ---------- 第一部分：先證明 ECharts 畫得出來（不依賴 Lark） ----------
+  const statusEl = document.getElementById('status');
+  const lines = [];
+  function log(text, cls) {
+    lines.push(cls ? `<span class="${cls}">${text}</span>` : text);
+    statusEl.innerHTML = lines.join('\n');
+  }
+
+  let chart;
+  if (typeof echarts === 'undefined') {
+    log('✗ ECharts 沒載入成功，多半是 cdn.jsdelivr.net 被公司網路擋掉了。', 'bad');
+  } else {
+    chart = echarts.init(document.getElementById('chart'));
+    chart.setOption({
+      title: { text: '假資料（用來確認畫得出來）', left: 'center' },
+      tooltip: { trigger: 'axis' },
+      grid: { left: 48, right: 24, top: 60, bottom: 40 },
+      xAxis: { type: 'category', data: ['甲', '乙', '丙', '丁', '戊'] },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', data: [120, 200, 150, 80, 170] }]
+    });
+    new ResizeObserver(() => chart.resize()).observe(document.body);
+    log('✓ ECharts 載入並繪製成功。', 'ok');
+  }
+</script>
+
+<script type="module">
+  // ---------- 第二部分：試著跟 Lark 說話，把結果印出來 ----------
+  const statusEl = document.getElementById('status');
+  function append(text, cls) {
+    const span = document.createElement('span');
+    if (cls) span.className = cls;
+    span.textContent = '\n' + text;
+    statusEl.appendChild(span);
+    statusEl.scrollTop = statusEl.scrollHeight;
+  }
+
+  // 給 SDK 4 秒，超時就代表不在 Lark 環境裡
+  const timeout = (ms) => new Promise((_, rej) =>
+    setTimeout(() => rej(new Error('等待逾時')), ms));
+
+  try {
+    const sdk = await import('https://cdn.jsdelivr.net/npm/@lark-base-open/js-sdk@1.0.2/+esm');
+    const { bitable } = sdk;
+    append('✓ Lark SDK 載入成功。', 'ok');
+
+    // 這裡會告訴我們：這個插件掛在什麼位置、拿得到什麼
+    const probe = (async () => {
+      const found = [];
+
+      try {
+        const state = bitable.dashboard?.state;
+        if (state) found.push(`儀錶板狀態：${state}`);
+      } catch (e) { /* 不在儀錶板環境 */ }
+
+      try {
+        const tables = await bitable.base.getTableMetaList();
+        found.push(`看得到 ${tables.length} 張資料表：` +
+          tables.map(t => t.name).join('、'));
+      } catch (e) {
+        found.push('讀不到資料表清單：' + e.message);
+      }
+
+      return found;
+    })();
+
+    const found = await Promise.race([probe, timeout(4000)]);
+    found.forEach(line => append('✓ ' + line, 'ok'));
+    append('\n整條路通了。接下來就是把假資料換成真資料。', 'ok');
+
+  } catch (err) {
+    append('✗ 沒接上 Lark：' + err.message, 'bad');
+    append('如果你是直接用瀏覽器開這個檔案，出現這行是正常的——'
+         + 'SDK 找不到宿主環境。要掛進 Lark 裡才會通。');
+  }
+</script>
+
+</body>
+</html>
