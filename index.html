@@ -11,7 +11,7 @@
     margin: 0; height: 100%;
     font-family: "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
   }
-  body { display: flex; }
+  body { display: flex; overflow: hidden; }
 
   #chart { flex: 1; min-width: 0; min-height: 0; }
 
@@ -34,11 +34,12 @@
   }
   #save:disabled { opacity: .45; cursor: default; }
 
+  /* 訊息區用絕對定位疊在上面，不佔版面 —— 避免它變高又觸發 resize */
   #msg {
-    position: fixed; left: 10px; bottom: 8px; right: 10px;
-    font-size: 11px; line-height: 1.5; color: #b42318;
+    position: absolute; left: 10px; bottom: 8px; width: 60%;
+    font-size: 11px; line-height: 1.5; color: #667085;
     white-space: pre-wrap; word-break: break-all;
-    max-height: 40%; overflow: auto;
+    max-height: 90px; overflow: auto; pointer-events: none;
   }
 </style>
 </head>
@@ -63,61 +64,45 @@
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
 
 <script type="module">
-import { bitable, dashboard, DashboardState }
+import { bitable, dashboard, DashboardState, SourceType }
   from 'https://cdn.jsdelivr.net/npm/@lark-base-open/js-sdk@1.0.2/+esm';
 
-const chart    = echarts.init(document.getElementById('chart'));
+const chartEl  = document.getElementById('chart');
+const chart    = echarts.init(chartEl);
 const panel    = document.getElementById('panel');
 const tableSel = document.getElementById('tableSel');
 const groupSel = document.getElementById('groupSel');
 const saveBtn  = document.getElementById('save');
 const msg      = document.getElementById('msg');
 
-new ResizeObserver(() => chart.resize()).observe(document.body);
-
-const say = (t) => { msg.textContent += (msg.textContent ? '\n' : '') + t; };
-window.addEventListener('error', e => say('錯誤：' + e.message));
-window.addEventListener('unhandledrejection',
-  e => say('未處理：' + (e.reason?.message || e.reason)));
-
-// ---------- 把各種格式的儲存格值，統一轉成一段可讀文字 ----------
-function toText(v) {
-  if (v === null || v === undefined || v === '') return '(空白)';
-  if (typeof v === 'string' || typeof v === 'number') return String(v);
-  if (Array.isArray(v)) {
-    const parts = v.map(x =>
-      typeof x === 'string' ? x : (x?.text ?? x?.name ?? '')
-    ).filter(Boolean);
-    return parts.length ? parts.join(', ') : '(空白)';
-  }
-  if (typeof v === 'object') return v.text ?? v.name ?? '(空白)';
-  return String(v);
+// ---------- 訊息輸出（最多留 6 行，避免洗版） ----------
+const logLines = [];
+function say(t) {
+  logLines.push(t);
+  if (logLines.length > 6) logLines.shift();
+  msg.textContent = logLines.join('\n');
 }
+window.addEventListener('error', e => {
+  // ResizeObserver 的迴圈警告是無害的雜訊，忽略它，否則會越報越多
+  if (/ResizeObserver/.test(e.message || '')) return;
+  say('錯誤：' + e.message);
+});
+window.addEventListener('unhandledrejection', e => {
+  const m = e.reason?.message || String(e.reason);
+  if (/ResizeObserver/.test(m)) return;
+  say('未處理：' + m);
+});
 
-// ---------- 自己把整欄讀出來，自己統計筆數 ----------
-async function countByField(tableId, fieldId) {
-  const table = await bitable.base.getTableById(tableId);
-  const field = await table.getFieldById(fieldId);
+// ---------- 縮放：只觀察圖表容器，而且用 rAF 節流 ----------
+let raf = 0;
+new ResizeObserver(() => {
+  cancelAnimationFrame(raf);
+  raf = requestAnimationFrame(() => chart.resize());
+}).observe(chartEl);
 
-  const tally = new Map();
-  let pageToken, hasMore = true, guard = 0;
-
-  while (hasMore && guard++ < 50) {          // 上限一萬筆，避免無限迴圈
-    const res = await field.getFieldValueListByPage({ pageSize: 200, pageToken });
-    for (const item of (res.fieldValues || [])) {
-      const key = toText(item.value);
-      tally.set(key, (tally.get(key) || 0) + 1);
-    }
-    hasMore   = res.hasMore;
-    pageToken = res.pageToken;
-  }
-
-  // 由多到少排序，只留前 20 名，免得軸擠爆
-  return [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20);
-}
-
-function draw(pairs, title) {
-  if (!pairs || pairs.length === 0) {
+// ---------- 繪圖 ----------
+function drawPairs(pairs, title) {
+  if (!pairs?.length) {
     chart.clear();
     chart.setOption({ title: { text: '沒有資料', left: 'center', top: 'middle' } });
     return;
@@ -139,58 +124,97 @@ function draw(pairs, title) {
   }, true);
 }
 
-async function render(tableId, fieldId, title) {
-  if (!tableId || !fieldId) return;
-  try {
-    draw(await countByField(tableId, fieldId), title);
-  } catch (e) { say('讀資料失敗：' + e.message); }
+// 主端回傳的 IData：第 0 列是表頭，之後每列 [分組, 數值]
+const fromHostData = (data) =>
+  (Array.isArray(data) ? data.slice(1) : [])
+    .map(r => [r[0]?.text ?? '(空白)', Number(r[1]?.value) || 0]);
+
+// ---------- 路線 A：主端幫忙算（正式環境要走這條，權限才正確） ----------
+const condition = (tableId, fieldId) => ({
+  tableId,
+  dataRange: { type: SourceType.ALL },
+  groups: [{ fieldId }],
+  series: 'COUNTA'
+});
+
+// ---------- 路線 B：自己讀自己算（主端不給資料時的備援） ----------
+function toText(v) {
+  if (v === null || v === undefined || v === '') return '(空白)';
+  if (typeof v === 'string' || typeof v === 'number') return String(v);
+  if (Array.isArray(v)) {
+    const parts = v.map(x => typeof x === 'string' ? x : (x?.text ?? x?.name ?? ''))
+                   .filter(Boolean);
+    return parts.length ? parts.join(', ') : '(空白)';
+  }
+  if (typeof v === 'object') return v.text ?? v.name ?? '(空白)';
+  return String(v);
+}
+
+async function selfCount(tableId, fieldId) {
+  const table = await bitable.base.getTableById(tableId);
+  const field = await table.getFieldById(fieldId);
+  const tally = new Map();
+  let pageToken, hasMore = true, guard = 0;
+  while (hasMore && guard++ < 50) {
+    const res = await field.getFieldValueListByPage({ pageSize: 200, pageToken });
+    for (const it of (res.fieldValues || [])) {
+      const k = toText(it.value);
+      tally.set(k, (tally.get(k) || 0) + 1);
+    }
+    hasMore = res.hasMore; pageToken = res.pageToken;
+  }
+  return [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20);
 }
 
 // ---------- 設定模式 ----------
 async function setupConfigUI() {
   panel.classList.add('show');
-  try {
-    const tables = await bitable.base.getTableMetaList();
-    for (const t of tables) tableSel.add(new Option(t.name, t.id));
+  const tables = await bitable.base.getTableMetaList();
+  for (const t of tables) tableSel.add(new Option(t.name, t.id));
 
-    const saved = await dashboard.getConfig().catch(() => null);
-    const c = saved?.customConfig;
-    if (c?.tableId && [...tableSel.options].some(o => o.value === c.tableId)) {
-      tableSel.value = c.tableId;
-    }
-    await loadFields(c?.fieldId);
-  } catch (e) { say('初始化失敗：' + e.message); }
+  const saved = await dashboard.getConfig().catch(() => null);
+  const c = saved?.customConfig;
+  if (c?.tableId && [...tableSel.options].some(o => o.value === c.tableId)) {
+    tableSel.value = c.tableId;
+  }
+  await loadFields(c?.fieldId);
 }
 
-async function loadFields(preferFieldId) {
+async function loadFields(prefer) {
   groupSel.innerHTML = '';
   saveBtn.disabled = true;
-  try {
-    const table  = await bitable.base.getTableById(tableSel.value);
-    const fields = await table.getFieldMetaList();
-    for (const f of fields) groupSel.add(new Option(f.name, f.id));
+  const table  = await bitable.base.getTableById(tableSel.value);
+  const fields = await table.getFieldMetaList();
+  for (const f of fields) groupSel.add(new Option(f.name, f.id));
+  if (prefer && [...groupSel.options].some(o => o.value === prefer)) {
+    groupSel.value = prefer;
+  }
+  saveBtn.disabled = fields.length === 0;
+  await preview();
+}
 
-    if (preferFieldId && [...groupSel.options].some(o => o.value === preferFieldId)) {
-      groupSel.value = preferFieldId;
-    }
-    saveBtn.disabled = fields.length === 0;
-    await render(tableSel.value, groupSel.value, '預覽');
-  } catch (e) { say('讀不到欄位：' + e.message); }
+async function preview() {
+  if (!tableSel.value || !groupSel.value) return;
+  try {
+    const data = await dashboard.getPreviewData(condition(tableSel.value, groupSel.value));
+    drawPairs(fromHostData(data), '預覽');
+  } catch (e) {
+    say('主端預覽失敗，改用自行統計：' + e.message);
+    drawPairs(await selfCount(tableSel.value, groupSel.value), '預覽（自行統計）');
+  }
 }
 
 tableSel.onchange = () => loadFields();
-groupSel.onchange = () => render(tableSel.value, groupSel.value, '預覽');
+groupSel.onchange = preview;
 
 saveBtn.onclick = async () => {
   saveBtn.disabled = true;
   try {
-    // 關鍵：dataConditions 留空，不讓主端去驗證它。
-    // 我們要的設定放在 customConfig，主端不會碰。
     await dashboard.saveConfig({
-      dataConditions: [],
-      customConfig: {
-        tableId:   tableSel.value,
-        fieldId:   groupSel.value,
+      dataConditions: [condition(tableSel.value, groupSel.value)],
+      customConfig: {                       // 備援用，主端不會動它
+        tableId: tableSel.value,
+        fieldId: groupSel.value,
         fieldName: groupSel.options[groupSel.selectedIndex]?.text || ''
       }
     });
@@ -200,26 +224,43 @@ saveBtn.onclick = async () => {
   }
 };
 
-// ---------- 檢視模式 ----------
+// ---------- 檢視模式：先試主端，失敗才自己來 ----------
 async function showSavedChart() {
   panel.classList.remove('show');
+  let cfg = null;
+  try { cfg = await dashboard.getConfig(); } catch (e) { say('取設定失敗：' + e.message); }
+
   try {
-    const cfg = await dashboard.getConfig();
-    const c   = cfg?.customConfig;
-    if (!c?.tableId) { say('沒有讀到已存的設定'); return; }
-    await render(c.tableId, c.fieldId, c.fieldName || '');
-  } catch (e) { say('取設定失敗：' + e.message); }
+    const data = await dashboard.getData();
+    const pairs = fromHostData(data);
+    if (pairs.length) {
+      drawPairs(pairs, cfg?.customConfig?.fieldName || '');
+      say('資料來源：主端統計');
+    } else {
+      throw new Error('主端沒有回傳資料');
+    }
+  } catch (e) {
+    say('主端取資料失敗：' + e.message);
+    const c = cfg?.customConfig;
+    if (c?.tableId) {
+      try {
+        drawPairs(await selfCount(c.tableId, c.fieldId), c.fieldName || '');
+        say('資料來源：自行統計（正式環境有權限風險）');
+      } catch (e2) { say('自行統計也失敗：' + e2.message); }
+    }
+  }
   dashboard.setRendered().catch(() => {});
 }
 
 if (dashboard.state === DashboardState.Create ||
     dashboard.state === DashboardState.Config) {
-  setupConfigUI();
+  setupConfigUI().catch(e => say('初始化失敗：' + e.message));
 } else {
   showSavedChart();
 }
 
 dashboard.onConfigChange(() => showSavedChart());
+dashboard.onDataChange(({ data }) => drawPairs(fromHostData(data)));
 </script>
 
 </body>
